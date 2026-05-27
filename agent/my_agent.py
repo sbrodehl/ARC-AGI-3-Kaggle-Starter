@@ -58,10 +58,23 @@ class MyAgent(Agent):
         if latest_frame.state in (GameState.NOT_PLAYED, GameState.GAME_OVER):
             return GameAction.RESET
 
-        # Pick any non-RESET action uniformly at random.
-        action = random.choice(
-            [a for a in GameAction if a is not GameAction.RESET]
-        )
+        # ── Per-game strategy fork ───────────────────────────────────────────
+        # By default every game uses the same uniformly-random strategy in the
+        # `else` branch below. This `if` shows ONE example of giving a single
+        # game its own heuristic: on LS20 we bias the random pick so ACTION4
+        # is twice as likely as any other action. Add more `elif` branches to
+        # specialize other games.
+        #
+        # `self.game_id` is set by the framework. It may be the short id
+        # ("ls20") or include a version suffix ("ls20-9607627b"), so we
+        # compare on the prefix to be safe.
+        pool = [a for a in GameAction if a is not GameAction.RESET]
+        if self.game_id.split("-")[0] == "ls20":
+            weights = [2 if a is GameAction.ACTION4 else 1 for a in pool]
+            action = random.choices(pool, weights=weights, k=1)[0]
+        else:
+            action = random.choice(pool)
+        # ────────────────────────────────────────────────────────────────────
 
         if action.is_complex():
             # ACTION6 takes (x, y) coordinates on a 64×64 grid.
