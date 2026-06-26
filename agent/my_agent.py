@@ -22,6 +22,7 @@ from __future__ import annotations
 import random
 import time
 import re
+import os
 from typing import Any
 
 from arcengine import FrameData, GameAction, GameState
@@ -33,11 +34,15 @@ from agents.agent import Agent
 from openai import OpenAI, APIConnectionError
 
 
-LLM_BASE_URL = "http://localhost:8000/v1"
+VLLM_BASE_URL = os.getenv("VLLM_BASE", "http://localhost:8000/v1")
+VLLM_API_KEY = os.getenv("VLLM_API_KEY", "local")
+
 try:
-    LLM_CLIENT = OpenAI(base_url=LLM_BASE_URL, api_key="local")
+    VLLM_CLIENT = OpenAI(base_url=VLLM_BASE_URL, api_key=VLLM_API_KEY)
+    VLLM_MODEL = VLLM_CLIENT.models.list().data.pop().id  # use the first model available
 except (ConnectionError, APIConnectionError):
     raise RuntimeError("LLM backend not available!")
+
 CANDIDATE_ACTIONS = [a for a in GameAction if a is not GameAction.RESET]
 ACTION_NAMES = [a.name for a in CANDIDATE_ACTIONS]
 SIMPLE_ACTION_NAMES = [a.name for a in CANDIDATE_ACTIONS if a.is_simple()]
@@ -84,12 +89,10 @@ class MyAgent(Agent):
     @staticmethod
     def _llm_choose_action(prompt: str, observation: str) -> str:
         try:
-            resp = LLM_CLIENT.chat.completions.create(
-                model="*",
+            resp = VLLM_CLIENT.chat.completions.create(
+                model=VLLM_MODEL,
                 messages=[
-                    {"role": "system", "content": "Return only valid ARC-AGI 3 action outputs."
-                                                  " These are one of the following:"
-                                                  " RESET, ACTION1, ACTION2, ACTION3, ACTION4, ACTION5, ACTION6, ACTION7"},
+                    {"role": "system", "content": "Return only valid ARC-AGI 3 action outputs."},
                     {"role": "user", "content": prompt + "\n" + observation},
                 ],
                 temperature=0.2
@@ -106,9 +109,11 @@ class MyAgent(Agent):
             return GameAction.RESET
 
         try:
-            obs_str = f"state={latest_frame.state}, game_id={self.game_id}"
+            obs_str = f"""state={latest_frame.state}, game_id={self.game_id}
+frame:
+{latest_frame.frame}"""
         except Exception:
-            obs_str = f"game_id={self.game_id}, latest_frame={latest_frame}"
+            raise RuntimeError("Unable to get latest frame.")
 
         llm_response = self._llm_choose_action(prompt=PROMPT, observation=obs_str)
 
@@ -132,7 +137,7 @@ class MyAgent(Agent):
 
         # TODO: needs fall back option! (e.g. random)
         if parsed_action is None:
-            # raise error early
+            # TODO DEBUG: raise error early
             raise RuntimeError("No action found in LLM response.")
 
         # --- Convert parsed output to GameAction object ---
@@ -150,7 +155,7 @@ class MyAgent(Agent):
                 raise RuntimeError("Unable to convert coordinates for complex action.")
 
             action.set_data({"x": x, "y": y})
-            action.reasoning = {"why": "llm complex action"}
+            action.reasoning = {"why": "vllm complex action"}
         else:
-            action.reasoning = {"why": "llm simple action"}
+            action.reasoning = {"why": "vllm simple action"}
         return action
