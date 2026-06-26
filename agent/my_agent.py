@@ -66,8 +66,7 @@ class MyAgent(Agent):
     def name(self) -> str:
         return f"{super().name}.{self.MAX_ACTIONS}"
 
-    @staticmethod
-    def is_done(frames: list[FrameData], latest_frame: FrameData) -> bool:
+    def is_done(self, frames: list[FrameData], latest_frame: FrameData) -> bool:
         # Stop once we win. Don't stop on GAME_OVER — we want to RESET and retry.
         return latest_frame.state is GameState.WIN
 
