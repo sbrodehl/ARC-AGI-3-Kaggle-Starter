@@ -68,7 +68,7 @@ class MyAgent(Agent):
     """Picks legal actions uniformly at random. Replace with your strategy."""
 
     # Upper bound on actions per game; the framework also enforces global limits.
-    MAX_ACTIONS = 80
+    MAX_ACTIONS = int(os.getenv("MAX_ACTIONS", "80"))
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -98,7 +98,7 @@ class MyAgent(Agent):
                 temperature=0.2
             )
         except (ConnectionError, APIConnectionError):
-            raise RuntimeError("LLM backend not available!")
+            raise RuntimeError("VLLM backend not available!")
         return resp.choices[0].message.content.strip()
 
     def choose_action(
@@ -138,7 +138,7 @@ frame:
         # TODO: needs fall back option! (e.g. random)
         if parsed_action is None:
             # TODO DEBUG: raise error early
-            raise RuntimeError("No action found in LLM response.")
+            raise RuntimeError("No action found in LLM response: \n" + llm_response)
 
         # --- Convert parsed output to GameAction object ---
         action = parsed_action
