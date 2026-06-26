@@ -23,6 +23,7 @@ import random
 import time
 import re
 import os
+from random import choice
 from typing import Any
 
 from arcengine import FrameData, GameAction, GameState
@@ -47,21 +48,8 @@ CANDIDATE_ACTIONS = [a for a in GameAction if a is not GameAction.RESET]
 ACTION_NAMES = [a.name for a in CANDIDATE_ACTIONS]
 SIMPLE_ACTION_NAMES = [a.name for a in CANDIDATE_ACTIONS if a.is_simple()]
 COMPLEX_ACTION_NAMES = [a.name for a in CANDIDATE_ACTIONS if a.is_complex()]
-PROMPT = f"""
-You are controlling an ARC agent.
-Given the current observation, choose exactly ONE action.
-
-Output format (ONLY one of these):
-1) SIMPLE
-ACTION=<one of :{", ".join(SIMPLE_ACTION_NAMES)}>
-
-2) COMPLEX:
-ACTION=<one of :{", ".join(COMPLEX_ACTION_NAMES)}>
-X=<0..63>
-Y=<0..63>
-
-Observation:
-""".strip()
+PROMPT = f"""Return the following line verbatim:
+ACTION={{RANDOM_ACTION}}""".strip()
 
 
 class MyAgent(Agent):
@@ -87,13 +75,13 @@ class MyAgent(Agent):
         return latest_frame.state is GameState.WIN
 
     @staticmethod
-    def _llm_choose_action(prompt: str, observation: str) -> str:
+    def _llm_choose_action(prompt: str) -> str:
         try:
             resp = VLLM_CLIENT.chat.completions.create(
                 model=VLLM_MODEL,
                 messages=[
                     {"role": "system", "content": "Return only valid ARC-AGI 3 action outputs."},
-                    {"role": "user", "content": prompt + "\n" + observation},
+                    {"role": "user", "content": prompt.format(RANDOM_ACTION=choice(SIMPLE_ACTION_NAMES))},
                 ],
                 temperature=0.2
             )
@@ -108,14 +96,7 @@ class MyAgent(Agent):
         if latest_frame.state in (GameState.NOT_PLAYED, GameState.GAME_OVER):
             return GameAction.RESET
 
-        try:
-            obs_str = f"""state={latest_frame.state}, game_id={self.game_id}
-frame:
-{latest_frame.frame}"""
-        except Exception:
-            raise RuntimeError("Unable to get latest frame.")
-
-        llm_response = self._llm_choose_action(prompt=PROMPT, observation=obs_str)
+        llm_response = self._llm_choose_action(prompt=PROMPT)
 
         # --- Parse model output ---
         # Accept variants like "ACTION=ACTION4" or "ACTION: ACTION4"
