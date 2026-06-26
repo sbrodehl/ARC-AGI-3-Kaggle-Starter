@@ -17,12 +17,11 @@ Contract (enforced by the ARC-AGI-3-Agents framework):
   - Implement `is_done(frames, latest_frame) -> bool`.
   - Implement `choose_action(frames, latest_frame) -> GameAction`.
 """
-from __future__ import annotations
-
 import random
 import time
 import re
 import os
+import sys
 from random import choice
 from typing import Any
 
@@ -45,18 +44,16 @@ except (ConnectionError, APIConnectionError):
     raise RuntimeError("LLM backend not available!")
 
 CANDIDATE_ACTIONS = [a for a in GameAction if a is not GameAction.RESET]
-ACTION_NAMES = [a.name for a in CANDIDATE_ACTIONS]
-SIMPLE_ACTION_NAMES = [a.name for a in CANDIDATE_ACTIONS if a.is_simple()]
-COMPLEX_ACTION_NAMES = [a.name for a in CANDIDATE_ACTIONS if a.is_complex()]
+SIMPLE_ACTIONS = [a for a in CANDIDATE_ACTIONS if a.is_simple()]
 PROMPT = f"""Return the following line verbatim:
 ACTION={{RANDOM_ACTION}}""".strip()
 
 
 class MyAgent(Agent):
-    """Picks legal actions uniformly at random. Replace with your strategy."""
+    """Picks legal actions uniformly at random."""
 
     # Upper bound on actions per game; the framework also enforces global limits.
-    MAX_ACTIONS = int(os.getenv("MAX_ACTIONS", "80"))
+    MAX_ACTIONS = int(os.getenv("MAX_ACTIONS", "50"))
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -81,7 +78,7 @@ class MyAgent(Agent):
                 model=VLLM_MODEL,
                 messages=[
                     {"role": "system", "content": "Return only valid ARC-AGI 3 action outputs."},
-                    {"role": "user", "content": prompt.format(RANDOM_ACTION=choice(SIMPLE_ACTION_NAMES))},
+                    {"role": "user", "content": prompt},
                 ],
                 temperature=0.2
             )
@@ -96,7 +93,8 @@ class MyAgent(Agent):
         if latest_frame.state in (GameState.NOT_PLAYED, GameState.GAME_OVER):
             return GameAction.RESET
 
-        llm_response = self._llm_choose_action(prompt=PROMPT)
+        rnd_action = choice(SIMPLE_ACTIONS)
+        llm_response = self._llm_choose_action(prompt=PROMPT.format(RANDOM_ACTION=rnd_action.name))
 
         # --- Parse model output ---
         # Accept variants like "ACTION=ACTION4" or "ACTION: ACTION4"
@@ -105,10 +103,8 @@ class MyAgent(Agent):
             return m.group(1).strip() if m else default
 
         action_str = get_value(r"^ACTION\s*[:=]\s*([A-Z0-9_]+)\s*$", default=None)
-        x_str = get_value(r"^X\s*[:=]\s*(\d+)\s*$", default=None)
-        y_str = get_value(r"^Y\s*[:=]\s*(\d+)\s*$", default=None)
 
-        parsed_action = None
+        parsed_action = GameAction.RESET
         if action_str:
             # action_str should match GameAction enum member name (e.g., ACTION4)
             for a in CANDIDATE_ACTIONS:
@@ -116,27 +112,11 @@ class MyAgent(Agent):
                     parsed_action = a
                     break
 
-        # TODO: needs fall back option! (e.g. random)
-        if parsed_action is None:
-            # TODO DEBUG: raise error early
-            raise RuntimeError("No action found in LLM response: \n" + llm_response)
+        if parsed_action.name != rnd_action.name:
+            print("[-] AI fucked up.", file=sys.stderr)
+            parsed_action = rnd_action
 
         # --- Convert parsed output to GameAction object ---
         action = parsed_action
-        if action.is_complex():
-            # If missing/invalid coords, fall back to random complex coords
-            try:
-                # assume random value if pattern didn't match
-                x = int(x_str) if x_str is not None else random.randint(0, 63)
-                y = int(y_str) if y_str is not None else random.randint(0, 63)
-                # clamp values to reasonable range
-                x = max(0, min(63, x))
-                y = max(0, min(63, y))
-            except Exception:
-                raise RuntimeError("Unable to convert coordinates for complex action.")
-
-            action.set_data({"x": x, "y": y})
-            action.reasoning = {"why": "vllm complex action"}
-        else:
-            action.reasoning = {"why": "vllm simple action"}
+        action.reasoning = {"why": "vllm simple action"}
         return action
