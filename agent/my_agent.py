@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import random
 import time
+import re
 from typing import Any
 
 from arcengine import FrameData, GameAction, GameState
@@ -28,6 +29,34 @@ from arcengine import FrameData, GameAction, GameState
 # When run inside the ARC-AGI-3-Agents framework (locally or on Kaggle)
 # the `agents` package is on sys.path, so this import resolves.
 from agents.agent import Agent
+
+from openai import OpenAI, APIConnectionError
+
+
+LLM_BASE_URL = "http://localhost:8000/v1"
+try:
+    LLM_CLIENT = OpenAI(base_url=LLM_BASE_URL, api_key="local")
+except (ConnectionError, APIConnectionError):
+    raise RuntimeError("LLM backend not available!")
+CANDIDATE_ACTIONS = [a for a in GameAction if a is not GameAction.RESET]
+ACTION_NAMES = [a.name for a in CANDIDATE_ACTIONS]
+SIMPLE_ACTION_NAMES = [a.name for a in CANDIDATE_ACTIONS if a.is_simple()]
+COMPLEX_ACTION_NAMES = [a.name for a in CANDIDATE_ACTIONS if a.is_complex()]
+PROMPT = f"""
+You are controlling an ARC agent.
+Given the current observation, choose exactly ONE action.
+
+Output format (ONLY one of these):
+1) SIMPLE
+ACTION=<one of :{", ".join(SIMPLE_ACTION_NAMES)}>
+
+2) COMPLEX:
+ACTION=<one of :{", ".join(COMPLEX_ACTION_NAMES)}>
+X=<0..63>
+Y=<0..63>
+
+Observation:
+""".strip()
 
 
 class MyAgent(Agent):
@@ -47,9 +76,27 @@ class MyAgent(Agent):
     def name(self) -> str:
         return f"{super().name}.{self.MAX_ACTIONS}"
 
-    def is_done(self, frames: list[FrameData], latest_frame: FrameData) -> bool:
+    @staticmethod
+    def is_done(frames: list[FrameData], latest_frame: FrameData) -> bool:
         # Stop once we win. Don't stop on GAME_OVER — we want to RESET and retry.
         return latest_frame.state is GameState.WIN
+
+    @staticmethod
+    def _llm_choose_action(prompt: str, observation: str) -> str:
+        try:
+            resp = LLM_CLIENT.chat.completions.create(
+                model="*",
+                messages=[
+                    {"role": "system", "content": "Return only valid ARC-AGI 3 action outputs."
+                                                  " These are one of the following:"
+                                                  " RESET, ACTION1, ACTION2, ACTION3, ACTION4, ACTION5, ACTION6, ACTION7"},
+                    {"role": "user", "content": prompt + "\n" + observation},
+                ],
+                temperature=0.2
+            )
+        except (ConnectionError, APIConnectionError):
+            raise RuntimeError("LLM backend not available!")
+        return resp.choices[0].message.content.strip()
 
     def choose_action(
         self, frames: list[FrameData], latest_frame: FrameData
@@ -58,30 +105,52 @@ class MyAgent(Agent):
         if latest_frame.state in (GameState.NOT_PLAYED, GameState.GAME_OVER):
             return GameAction.RESET
 
-        # ── Per-game strategy fork ───────────────────────────────────────────
-        # By default every game uses the same uniformly-random strategy in the
-        # `else` branch below. This `if` shows ONE example of giving a single
-        # game its own heuristic: on LS20 we bias the random pick so ACTION4
-        # is twice as likely as any other action. Add more `elif` branches to
-        # specialize other games.
-        #
-        # `self.game_id` is set by the framework. It may be the short id
-        # ("ls20") or include a version suffix ("ls20-9607627b"), so we
-        # compare on the prefix to be safe.
-        candidate_actions = [a for a in GameAction if a is not GameAction.RESET]
-        if self.game_id.split("-")[0] == "ls20":
-            weights = [2 if a is GameAction.ACTION4 else 1 for a in candidate_actions]
-            action = random.choices(candidate_actions, weights=weights, k=1)[0]
-        else:
-            action = random.choice(candidate_actions)
-        # ────────────────────────────────────────────────────────────────────
+        try:
+            obs_str = f"state={latest_frame.state}, game_id={self.game_id}"
+        except Exception:
+            obs_str = f"game_id={self.game_id}, latest_frame={latest_frame}"
 
+        llm_response = self._llm_choose_action(prompt=PROMPT, observation=obs_str)
+
+        # --- Parse model output ---
+        # Accept variants like "ACTION=ACTION4" or "ACTION: ACTION4"
+        def get_value(pattern: str, default=None):
+            m = re.search(pattern, llm_response, flags=re.IGNORECASE | re.MULTILINE)
+            return m.group(1).strip() if m else default
+
+        action_str = get_value(r"^ACTION\s*[:=]\s*([A-Z0-9_]+)\s*$", default=None)
+        x_str = get_value(r"^X\s*[:=]\s*(\d+)\s*$", default=None)
+        y_str = get_value(r"^Y\s*[:=]\s*(\d+)\s*$", default=None)
+
+        parsed_action = None
+        if action_str:
+            # action_str should match GameAction enum member name (e.g., ACTION4)
+            for a in CANDIDATE_ACTIONS:
+                if a.name.upper() == action_str.upper():
+                    parsed_action = a
+                    break
+
+        # TODO: needs fall back option! (e.g. random)
+        if parsed_action is None:
+            # raise error early
+            raise RuntimeError("No action found in LLM response.")
+
+        # --- Convert parsed output to GameAction object ---
+        action = parsed_action
         if action.is_complex():
-            # ACTION6 takes (x, y) coordinates on a 64×64 grid.
-            action.set_data(
-                {"x": random.randint(0, 63), "y": random.randint(0, 63)}
-            )
-            action.reasoning = {"why": "random complex action"}
+            # If missing/invalid coords, fall back to random complex coords
+            try:
+                # assume random value if pattern didn't match
+                x = int(x_str) if x_str is not None else random.randint(0, 63)
+                y = int(y_str) if y_str is not None else random.randint(0, 63)
+                # clamp values to reasonable range
+                x = max(0, min(63, x))
+                y = max(0, min(63, y))
+            except Exception:
+                raise RuntimeError("Unable to convert coordinates for complex action.")
+
+            action.set_data({"x": x, "y": y})
+            action.reasoning = {"why": "llm complex action"}
         else:
-            action.reasoning = f"random simple action: {action.value}"
+            action.reasoning = {"why": "llm simple action"}
         return action
