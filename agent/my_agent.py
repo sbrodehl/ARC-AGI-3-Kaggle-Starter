@@ -19,10 +19,8 @@ Contract (enforced by the ARC-AGI-3-Agents framework):
 """
 import random
 import time
-import re
 import os
-import sys
-from random import choice
+import json
 from typing import Any
 
 from arcengine import FrameData, GameAction, GameState
@@ -31,22 +29,18 @@ from arcengine import FrameData, GameAction, GameState
 # the `agents` package is on sys.path, so this import resolves.
 from agents.agent import Agent
 
-from openai import OpenAI, APIConnectionError
-
-
-VLLM_BASE_URL = os.getenv("VLLM_BASE", "http://localhost:8000/v1")
-VLLM_API_KEY = os.getenv("VLLM_API_KEY", "local")
 
 try:
+    from openai import OpenAI, APIConnectionError
+    VLLM_BASE_URL = os.getenv("VLLM_BASE", "http://localhost:8000/v1")
+    VLLM_API_KEY = os.getenv("VLLM_API_KEY", "local")
     VLLM_CLIENT = OpenAI(base_url=VLLM_BASE_URL, api_key=VLLM_API_KEY)
     VLLM_MODEL = VLLM_CLIENT.models.list().data.pop().id  # use the first model available
-except (ConnectionError, APIConnectionError):
-    raise RuntimeError("LLM backend not available!")
-
-CANDIDATE_ACTIONS = [a for a in GameAction if a is not GameAction.RESET]
-SIMPLE_ACTIONS = [a for a in CANDIDATE_ACTIONS if a.is_simple()]
-PROMPT = f"""Return the following line verbatim:
-ACTION={{RANDOM_ACTION}}""".strip()
+    _USE_LLM = True
+    print("[+] vLLM available!")
+except Exception:
+    _USE_LLM = False
+    print("[-] vLLM not available!")
 
 
 class MyAgent(Agent):
@@ -70,21 +64,6 @@ class MyAgent(Agent):
         # Stop once we win. Don't stop on GAME_OVER — we want to RESET and retry.
         return latest_frame.state is GameState.WIN
 
-    @staticmethod
-    def _llm_choose_action(prompt: str) -> str:
-        try:
-            resp = VLLM_CLIENT.chat.completions.create(
-                model=VLLM_MODEL,
-                messages=[
-                    {"role": "system", "content": "Return only valid ARC-AGI 3 action outputs."},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.2
-            )
-        except (ConnectionError, APIConnectionError):
-            raise RuntimeError("VLLM backend not available!")
-        return resp.choices[0].message.content.strip()
-
     def choose_action(
         self, frames: list[FrameData], latest_frame: FrameData
     ) -> GameAction:
@@ -92,30 +71,42 @@ class MyAgent(Agent):
         if latest_frame.state in (GameState.NOT_PLAYED, GameState.GAME_OVER):
             return GameAction.RESET
 
-        rnd_action = choice(SIMPLE_ACTIONS)
-        llm_response = self._llm_choose_action(prompt=PROMPT.format(RANDOM_ACTION=rnd_action.name))
+        if _USE_LLM:
+            return self._llm_action(frames, latest_frame)
+        return self._random_action()
 
-        # --- Parse model output ---
-        # Accept variants like "ACTION=ACTION4" or "ACTION: ACTION4"
-        def get_value(pattern: str, default=None):
-            m = re.search(pattern, llm_response, flags=re.IGNORECASE | re.MULTILINE)
-            return m.group(1).strip() if m else default
+    def _llm_action(self, frames, latest_frame) -> GameAction:
+        candidates = [a for a in GameAction if a is not GameAction.RESET]
+        valid_values = [a.value for a in candidates]
 
-        action_str = get_value(r"^ACTION\s*[:=]\s*([A-Z0-9_]+)\s*$", default=None)
+        prompt = (
+            f"You are playing ARC-AGI-3 game '{self.game_id}'.\n"
+            f"Move number: {len(frames)}\n"
+            f"Current frame: {latest_frame}\n\n"
+            f"Valid actions: {valid_values}\n"
+            f"Respond ONLY with JSON: {{\"action\": \"<value>\", \"reasoning\": \"<why>\"}}"
+        )
+        try:
+            resp = VLLM_CLIENT.chat.completions.create(
+                model=VLLM_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=150,
+                temperature=0.1,
+            )
+            parsed = json.loads(resp.choices[0].message.content.strip())
+            action = GameAction(parsed["action"])
+            action.reasoning = parsed.get("reasoning", "llm")
+            return action
+        except Exception as e:
+            action = self._random_action()
+            action.reasoning = f"llm fallback: {e}"
+            return action
 
-        parsed_action = GameAction.RESET
-        if action_str:
-            # action_str should match GameAction enum member name (e.g., ACTION4)
-            for a in CANDIDATE_ACTIONS:
-                if a.name.upper() == action_str.upper():
-                    parsed_action = a
-                    break
-
-        if parsed_action.name != rnd_action.name:
-            print("[-] AI fucked up.", file=sys.stderr)
-            parsed_action = rnd_action
-
-        # --- Convert parsed output to GameAction object ---
-        action = parsed_action
-        action.reasoning = {"why": "vllm simple action"}
+    @staticmethod
+    def _random_action() -> GameAction:
+        candidates = [a for a in GameAction if a is not GameAction.RESET]
+        action = random.choice(candidates)
+        if action.is_complex():
+            action.set_data({"x": random.randint(0, 63), "y": random.randint(0, 63)})
+        action.reasoning = "random fallback"
         return action
