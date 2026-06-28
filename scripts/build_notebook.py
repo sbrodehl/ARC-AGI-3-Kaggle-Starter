@@ -77,6 +77,45 @@ def build() -> dict:
         "%%writefile /tmp/my_agent.py\n" + agent_body
     )
 
+    # start vllm in a subprocess
+    vllm_start_cell = dedent("""\
+        import os, subprocess, time, urllib.request, urllib.error
+
+        if os.getenv('KAGGLE_IS_COMPETITION_RERUN'):
+            MODEL_PATH = "/kaggle/input/qwen2-5-7b-instruct"  # your dataset mount path
+            VLLM_PORT  = 8000
+
+            print("Starting vLLM server...")
+            vllm_proc = subprocess.Popen(
+                [
+                    "python", "-m", "vllm.entrypoints.openai.api_server",
+                    "--model",               MODEL_PATH,
+                    "--served-model-name",   "my-model",
+                    "--port",                str(VLLM_PORT),
+                    "--gpu-memory-utilization", "0.85",
+                    "--max-model-len",       "4096",
+                    "--dtype",               "half",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+
+            # Poll until the server is accepting requests (up to 15 minutes)
+            health_url = f"http://localhost:{VLLM_PORT}/health"
+            for attempt in range(3*60):
+                try:
+                    urllib.request.urlopen(health_url, timeout=5)
+                    print(f"vLLM ready after {attempt * 5}s")
+                    break
+                except (urllib.error.URLError, OSError):
+                    time.sleep(5)
+            else:
+                # Dump logs and abort if server never came up
+                out, _ = vllm_proc.communicate(timeout=5)
+                raise RuntimeError(f"vLLM failed to start:\\n{out.decode()}")
+    """)
+    vllm_startup_cell = code_cell(vllm_start_cell)
+
     run_cell_source = dedent(
         """\
         import os
@@ -190,6 +229,7 @@ def build() -> dict:
             ),
             install_cell,
             write_agent_cell,
+            vllm_startup_cell,
             run_cell,
             dummy_submission_cell,
         ],
