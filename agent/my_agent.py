@@ -21,6 +21,7 @@ import random
 import time
 import os
 import json
+import logging
 from typing import Any
 
 from arcengine import FrameData, GameAction, GameState
@@ -28,6 +29,8 @@ from arcengine import FrameData, GameAction, GameState
 # When run inside the ARC-AGI-3-Agents framework (locally or on Kaggle)
 # the `agents` package is on sys.path, so this import resolves.
 from agents.agent import Agent
+
+logger = logging.getLogger()
 
 
 try:
